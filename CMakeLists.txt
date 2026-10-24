@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(orderbook LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -21,7 +21,7 @@ target_compile_options(orderbook_warnings INTERFACE -Wall -Wextra -Wpedantic)
 # Header-only for now; becomes a real library once src/ has files
 add_library(orderbook INTERFACE)
 target_include_directories(orderbook INTERFACE include)
-target_compile_features(orderbook INTERFACE cxx_std_20)
+target_compile_features(orderbook INTERFACE cxx_std_23)
 
 include(FetchContent)
 FetchContent_Declare(googletest
