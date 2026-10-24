@@ -1,0 +1,15 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitize: ["address,undefined", "thread"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSANITIZE="${{ matrix.sanitize }}"
+      - run: cmake --build build-ci
+      - run: ctest --test-dir build-ci --output-on-failure
