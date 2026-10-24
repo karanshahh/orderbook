@@ -1,6 +1,8 @@
 #pragma once
 #include <compare>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace ob {
 
@@ -11,6 +13,14 @@ struct OrderId  { std::uint64_t value{}; auto operator<=>(const OrderId&)  const
 enum class Side : std::uint8_t { Buy, Sell };
 enum class OrderType : std::uint8_t { Limit, Market };
 
-// TODO: std::hash<ob::OrderId> specialization (needed for unordered_map).
-
 }  // namespace ob
+
+namespace std {
+template <>
+struct hash<ob::OrderId> {
+    size_t operator()(const ob::OrderId& id) const noexcept {
+        // TODO: return hash of id.value
+        return 0;
+    }
+};
+}  // namespace std
