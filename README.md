@@ -160,8 +160,76 @@ Real data:
 
 ## Results
 
-Results are added here with the machine, compiler, flags and workload they
-came from.
+All numbers are **VM numbers**: OrbStack Ubuntu VM on Apple Silicon (aarch64,
+8 CPUs), GCC 15.2, Release build (`-O3 -DNDEBUG`). Each figure is the range
+over 3 runs. The VM clock ticks every 41 ns, so per-operation latencies are
+rounded to it: 42 ns means "one tick or less". Throughput is not affected.
+
+### Synthetic workload (`orderbook_bench`)
+
+100,000 resting orders held steady; 1,000,000 operations: about 50% adds,
+40% cancels of live orders, 10% market orders. Seed 42.
+
+| Engine | Throughput | Time per operation |
+|---|---|---|
+| v1 | 8.30M to 8.86M ops/s | 113 to 121 ns |
+| v2 | 49.8M to 61.5M ops/s | 16 to 20 ns |
+| **v2 vs v1** | **5.6x to 7.0x** | |
+
+Latency per operation, nanoseconds:
+
+| Engine | Operation | p50 | p99 | p99.9 |
+|---|---|---|---|---|
+| v1 | add | 125 | 167 to 208 | 292 to 2,000 |
+| v1 | cancel | 208 to 250 | 417 to 501 | 4,000 to 4,334 |
+| v1 | match | 83 | 292 to 333 | 458 to 2,167 |
+| v2 | add | 42 | 83 to 84 | 125 to 167 |
+| v2 | cancel | 42 to 83 | 209 to 292 | 2,542 to 3,666 |
+| v2 | match | 42 | 125 | 209 to 250 |
+
+One mutex around v1, shared by N threads (same total work):
+
+| Setup | Throughput | vs. no lock |
+|---|---|---|
+| No lock, 1 thread | 7.09M to 9.60M ops/s | |
+| Mutex, 1 thread | 7.46M to 7.79M ops/s | 0.81x to 1.10x |
+| Mutex, 2 threads | 3.13M to 3.39M ops/s | 0.33x to 0.46x |
+| Mutex, 4 threads | 2.92M to 3.17M ops/s | 0.33x to 0.44x |
+
+### Real market data (`itch_replay`)
+
+Nasdaq PSX, full trading day `20190130.PSX_ITCH_50` (1.24 GB, 41.4M messages).
+
+Correctness, for both symbols: v1 and v2 produced identical events on every
+operation, with 0 trades, 0 rejects, 0 unknown order references, and the book
+never crossed.
+
+| Symbol | Book operations | Peak resting orders | v1 | v2 | v2 vs v1 |
+|---|---|---|---|---|---|
+| QQQ | 979,275 | 133 | 15.4M to 15.9M ops/s | 70.4M to 72.5M ops/s | 4.5x to 4.7x |
+| MSFT | 322,757 | 38 | 14.9M to 15.1M ops/s | 68.4M to 70.0M ops/s | 4.5x to 4.7x |
+
+QQQ latency, nanoseconds (p50 / p99.9): v1 add 84 / 167 to 375, cancel 83 / 167
+to 250; v2 add 42 / 84 to 125, cancel 42 / 333.
+
+Parsing the whole file: 11.7M messages/s when read from disk, 45.0M
+messages/s when the file was already in memory (second run), including the
+work of building the replay.
+
+### What the numbers show
+
+- **v2 is 5.6x to 7.0x faster on a deep book and 4.5x to 4.7x on real data.**
+  The real PSX books are tiny (38 to 133 resting orders), so v1's trees and
+  lists already sit in cache there and its disadvantage is smaller.
+- **v1.0.0's worst-case add spikes (9 to 12 ms) disappeared** once the
+  benchmark held the book at a steady size. That fits hash-table resizing
+  during growth. Pre-sizing the index (`reserve`) did not clearly change the
+  tail in steady state, so the cause is likely but not proven.
+- **Cancels have the longest tail in both engines** (p99.9 of 2.5 to 4.6 µs).
+  A likely cause is cache misses from cancelling orders at random places in
+  memory; this is the next thing to measure.
+- **Sharing one mutex costs little with one thread and a lot with two or
+  more**: throughput falls to a third to a half. Matching stays on one thread.
 
 ## Repository layout
 
