@@ -20,7 +20,7 @@ template <>
 struct hash<ob::OrderId> {
     size_t operator()(const ob::OrderId& id) const noexcept {
         // TODO: return hash of id.value
-        return 0;
+        return std::hash<std::uint64_t>{}(id.value);
     }
 };
 }  // namespace std
