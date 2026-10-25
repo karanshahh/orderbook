@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 project(orderbook LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -37,6 +37,7 @@ target_link_libraries(orderbook_bench PRIVATE orderbook orderbook_warnings Threa
 add_executable(itch_replay tools/itch_replay.cpp)
 target_link_libraries(itch_replay PRIVATE itch orderbook_warnings)
 
+if(PROJECT_IS_TOP_LEVEL)
 include(FetchContent)
 FetchContent_Declare(googletest
   URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
@@ -45,3 +46,4 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 add_subdirectory(tests)
+endif()
