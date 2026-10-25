@@ -1,8 +1,5 @@
-// Order book benchmark: per-operation latency percentiles and throughput,
-// plus the cost of wrapping the book in a mutex.
-//
-// Build in Release (no sanitizers) or the numbers mean nothing.
-// Numbers from the OrbStack VM are "VM numbers".
+// Synthetic benchmark: v1 vs v2 latency and throughput, plus lock contention.
+// Build in Release without sanitizers; the program warns if you don't.
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +12,7 @@
 
 #include "orderbook/book.hpp"
 #include "orderbook/locked_book.hpp"
+#include "orderbook/v2/book.hpp"
 
 using namespace ob;
 using Clock = std::chrono::steady_clock;
@@ -22,221 +20,242 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 // ---------------- workload ----------------
-// Passive limit orders rest away from the mid (buys below, sells above), so
-// they never trade. Market orders always trade. Cancels hit a random id that
-// was added earlier (it may already be filled, which is a cheap reject).
-enum class Kind : std::uint8_t { AddPassive, Cancel, Match };
+// Steady state: the book is held near a target size. Passive limit orders rest
+// within 50 ticks of the mid (buys below, sells above) and never trade. Market
+// orders always trade. Cancels always hit a live order: a shadow v1 book is run
+// while generating, so we know which ids are still resting.
+enum class Kind : std::uint8_t { Add, Cancel, Match };
+struct Op { Kind kind; Order order; };
 
-struct Op {
-    Kind kind;
-    Order order;   // AddPassive / Match
-    OrderId id;    // Cancel
+constexpr std::int64_t kMid = 10'000;
+constexpr int kPreload = 100'000;
+
+struct Workload {
+    std::vector<Op> preload;   // run untimed before measuring
+    std::vector<Op> ops;       // timed
+    std::uint64_t   max_id = 0;
 };
 
-struct Config {
-    int ops = 1'000'000;
-    int warmup_orders = 100'000;
-    int add_pct = 60, cancel_pct = 30;   // remainder = market (match)
-    std::uint64_t seed = 42;
-};
-
-std::vector<Op> make_ops(const Config& c, std::uint64_t id_base, std::uint64_t seed) {
+Workload make_workload(int n_ops, std::uint64_t seed) {
     std::mt19937_64 rng(seed);
     std::uniform_int_distribution<int> pct(0, 99), offset(1, 50), qty(1, 100), side(0, 1);
-    constexpr std::int64_t mid = 10'000;
-    std::vector<Op> ops;
-    ops.reserve(static_cast<std::size_t>(c.ops));
-    std::uint64_t next = id_base;
-    for (int i = 0; i < c.ops; ++i) {
+    Book shadow;
+    std::vector<std::uint64_t> live;   // candidate ids; dead ones removed lazily
+    std::uint64_t next = 1;
+    Workload w;
+
+    auto passive = [&] {
+        Side s = side(rng) ? Side::Buy : Side::Sell;
+        std::int64_t px = s == Side::Buy ? kMid - offset(rng) : kMid + offset(rng);
+        Order o{OrderId{next++}, s, OrderType::Limit, Price{px},
+                Quantity{static_cast<std::uint64_t>(qty(rng))}};
+        live.push_back(o.id.value);
+        return Op{Kind::Add, o};
+    };
+
+    for (int i = 0; i < kPreload; ++i) {
+        w.preload.push_back(passive());
+        shadow.add(w.preload.back().order);
+    }
+
+    while (static_cast<int>(w.ops.size()) < n_ops) {
         int p = pct(rng);
-        Side s = side(rng) ? Side::Buy : Side::Sell;
-        if (p < c.add_pct || next == id_base) {
-            std::int64_t px = s == Side::Buy ? mid - offset(rng) : mid + offset(rng);
-            ops.push_back({Kind::AddPassive,
-                           Order{OrderId{next++}, s, OrderType::Limit, Price{px},
-                                 Quantity{static_cast<std::uint64_t>(qty(rng))}},
-                           {}});
-        } else if (p < c.add_pct + c.cancel_pct) {
-            std::uniform_int_distribution<std::uint64_t> pick(id_base, next - 1);
-            ops.push_back({Kind::Cancel, {}, OrderId{pick(rng)}});
+        const std::size_t size = shadow.open_orders();
+        Op op;
+        if (size < kPreload * 9 / 10) p = 0;              // too small: add
+        else if (size > kPreload * 11 / 10) p = 55;       // too big: cancel
+        if (p < 50) {
+            op = passive();
+        } else if (p < 90) {
+            std::uint64_t id = 0;
+            while (!live.empty()) {
+                std::uniform_int_distribution<std::size_t> pick(0, live.size() - 1);
+                std::size_t i = pick(rng);
+                if (shadow.find(OrderId{live[i]})) { id = live[i]; live[i] = live.back(); live.pop_back(); break; }
+                live[i] = live.back(); live.pop_back();     // filled earlier: drop it
+            }
+            if (id == 0) continue;
+            op = Op{Kind::Cancel, Order{OrderId{id}, Side::Buy, OrderType::Limit, Price{0}, Quantity{0}}};
         } else {
-            ops.push_back({Kind::Match,
-                           Order{OrderId{next++}, s, OrderType::Market, Price{0},
-                                 Quantity{static_cast<std::uint64_t>(qty(rng) / 4 + 1)}},
-                           {}});
+            Side s = side(rng) ? Side::Buy : Side::Sell;
+            op = Op{Kind::Match, Order{OrderId{next++}, s, OrderType::Market, Price{0},
+                                      Quantity{static_cast<std::uint64_t>(qty(rng) / 4 + 1)}}};
         }
+        if (op.kind == Kind::Cancel) shadow.cancel(op.order.id);
+        else                         shadow.add(op.order);
+        w.ops.push_back(op);
     }
-    return ops;
+    w.max_id = next + 1;
+    return w;
 }
 
-template <typename B>
-void prefill(B& book, int n, std::uint64_t id_base, std::uint64_t seed) {
-    std::mt19937_64 rng(seed);
-    std::uniform_int_distribution<int> offset(1, 50), qty(1, 100), side(0, 1);
-    for (int i = 0; i < n; ++i) {
-        Side s = side(rng) ? Side::Buy : Side::Sell;
-        std::int64_t px = s == Side::Buy ? 10'000 - offset(rng) : 10'000 + offset(rng);
-        book.add(Order{OrderId{id_base + static_cast<std::uint64_t>(i)}, s, OrderType::Limit,
-                       Price{px}, Quantity{static_cast<std::uint64_t>(qty(rng))}});
-    }
+v2::Config v2_config(std::uint64_t max_id) {
+    return v2::Config{Price{kMid - 1'000}, Price{kMid + 1'000}, 400'000, max_id};
 }
 
-template <typename B>
-std::size_t run(B& book, const Op& op) {
-    switch (op.kind) {
-        case Kind::AddPassive:
-        case Kind::Match:  return book.add(op.order).size();
-        case Kind::Cancel: return book.cancel(op.id).size();
-    }
-    return 0;
+// ---------------- engines behind one interface ----------------
+struct V1      { Book b;              std::size_t run(const Op& op); };
+struct V1Res   { Book b;              std::size_t run(const Op& op); };   // index pre-sized
+struct V2      { v2::Book b; std::vector<Event> out;
+                 explicit V2(std::uint64_t max_id) : b(v2_config(max_id)) { out.reserve(4'096); }
+                 std::size_t run(const Op& op); };
+
+std::size_t V1::run(const Op& op) {
+    return op.kind == Kind::Cancel ? b.cancel(op.order.id).size() : b.add(op.order).size();
+}
+std::size_t V1Res::run(const Op& op) {
+    return op.kind == Kind::Cancel ? b.cancel(op.order.id).size() : b.add(op.order).size();
+}
+std::size_t V2::run(const Op& op) {
+    out.clear();
+    if (op.kind == Kind::Cancel) b.cancel(op.order.id, out);
+    else                         b.add(op.order, out);
+    return out.size();
 }
 
-// Keeps the compiler from deleting work whose result is unused.
-volatile std::size_t g_sink = 0;
+volatile std::size_t g_sink = 0;   // keeps the compiler from deleting the work
+
+std::uint64_t ns_between(Clock::time_point a, Clock::time_point b) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+}
 
 // ---------------- reporting ----------------
-void report(const char* name, std::vector<std::uint64_t>& ns) {
-    if (ns.empty()) return;
-    std::sort(ns.begin(), ns.end());
-    auto pct = [&](double p) {
-        std::size_t i = static_cast<std::size_t>(p * static_cast<double>(ns.size() - 1));
-        return ns[i];
-    };
-    std::printf("  %-12s n=%-8zu p50=%-6llu p90=%-6llu p99=%-6llu p99.9=%-7llu max=%llu  (ns)\n",
-                name, ns.size(),
-                (unsigned long long)pct(0.50), (unsigned long long)pct(0.90),
-                (unsigned long long)pct(0.99), (unsigned long long)pct(0.999),
-                (unsigned long long)ns.back());
+struct Pcts { std::uint64_t p50, p90, p99, p999, max; };
+Pcts pcts(std::vector<std::uint64_t>& v) {
+    std::sort(v.begin(), v.end());
+    auto at = [&](double p) { return v[static_cast<std::size_t>(p * static_cast<double>(v.size() - 1))]; };
+    return {at(0.50), at(0.90), at(0.99), at(0.999), v.back()};
+}
+void row(const char* engine, const char* op, std::vector<std::uint64_t>& v) {
+    if (v.empty()) return;
+    Pcts p = pcts(v);
+    std::printf("  %-10s %-7s %9zu %7llu %7llu %7llu %8llu %10llu\n", engine, op, v.size(),
+                (unsigned long long)p.p50, (unsigned long long)p.p90, (unsigned long long)p.p99,
+                (unsigned long long)p.p999, (unsigned long long)p.max);
 }
 
-std::uint64_t clock_overhead_ns() {
-    std::vector<std::uint64_t> d(100'000);
-    for (auto& x : d) {
-        auto a = Clock::now();
-        auto b = Clock::now();
-        x = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+template <typename E>
+void latency(const char* name, E& e, const Workload& w) {
+    for (const auto& op : w.preload) g_sink = g_sink + e.run(op);
+    std::vector<std::uint64_t> add, cancel, match;
+    add.reserve(w.ops.size()); cancel.reserve(w.ops.size()); match.reserve(w.ops.size());
+    for (const auto& op : w.ops) {
+        auto t0 = Clock::now();
+        g_sink = g_sink + e.run(op);
+        auto t1 = Clock::now();
+        (op.kind == Kind::Add ? add : op.kind == Kind::Cancel ? cancel : match).push_back(ns_between(t0, t1));
     }
-    std::sort(d.begin(), d.end());
-    return d[d.size() / 2];
+    row(name, "add", add);
+    row(name, "cancel", cancel);
+    row(name, "match", match);
+}
+
+template <typename E>
+double throughput(E& e, const Workload& w) {
+    for (const auto& op : w.preload) g_sink = g_sink + e.run(op);
+    auto t0 = Clock::now();
+    for (const auto& op : w.ops) g_sink = g_sink + e.run(op);
+    return static_cast<double>(w.ops.size()) / std::chrono::duration<double>(Clock::now() - t0).count();
+}
+
+std::uint64_t clock_tick_ns() {
+    // Smallest non-zero step the clock reports.
+    std::uint64_t best = ~0ull;
+    for (int i = 0; i < 200'000; ++i) {
+        auto a = Clock::now(), b = Clock::now();
+        while (b == a) b = Clock::now();
+        best = std::min(best, ns_between(a, b));
+    }
+    return best;
 }
 
 void print_build_info() {
-    std::printf("== build ==\n");
 #if defined(__clang__)
-    std::printf("  compiler: clang %s\n", __clang_version__);
+    std::printf("compiler     clang %s\n", __clang_version__);
 #elif defined(__GNUC__)
-    std::printf("  compiler: gcc %s\n", __VERSION__);
+    std::printf("compiler     gcc %s\n", __VERSION__);
 #endif
 #ifdef NDEBUG
-    std::printf("  NDEBUG: on\n");
+    std::printf("build        Release (NDEBUG on)\n");
 #else
-    std::printf("  NDEBUG: OFF  <-- not a Release build, numbers are not meaningful\n");
+    std::printf("build        NOT Release: numbers are not meaningful\n");
 #endif
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
-    std::printf("  SANITIZER BUILD  <-- numbers are not meaningful\n");
+    std::printf("WARNING      sanitizer build: numbers are not meaningful\n");
 #endif
-#if defined(__has_feature)
-#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-    std::printf("  SANITIZER BUILD  <-- numbers are not meaningful\n");
-#  endif
-#endif
-    std::printf("  hardware threads: %u\n", std::thread::hardware_concurrency());
-    std::printf("  (record CPU model with: lscpu | head -20)\n");
-}
-
-double seconds_since(Clock::time_point t0) {
-    return std::chrono::duration<double>(Clock::now() - t0).count();
+    std::printf("hw threads   %u\n", std::thread::hardware_concurrency());
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    Config cfg;
-    if (argc > 1) cfg.ops = std::stoi(argv[1]);
+    const int n_ops = argc > 1 ? std::stoi(argv[1]) : 1'000'000;
+    const std::uint64_t seed = 42;
 
     print_build_info();
-    std::printf("== workload ==\n  ops=%d  warmup resting orders=%d  mix: %d%% add, %d%% cancel, %d%% market  seed=%llu\n",
-                cfg.ops, cfg.warmup_orders, cfg.add_pct, cfg.cancel_pct,
-                100 - cfg.add_pct - cfg.cancel_pct, (unsigned long long)cfg.seed);
-    std::printf("  clock overhead (median of now()-now()): %llu ns, included in every latency below\n",
-                (unsigned long long)clock_overhead_ns());
+    std::printf("clock tick   %llu ns (per-op latencies are rounded to this)\n",
+                (unsigned long long)clock_tick_ns());
 
-    constexpr std::uint64_t kWarmBase = 1;
-    constexpr std::uint64_t kOpsBase = 1'000'000'000ULL;
-    const auto ops = make_ops(cfg, kOpsBase, cfg.seed);
+    const Workload w = make_workload(n_ops, seed);
+    std::printf("workload     %d preloaded orders, %zu timed ops, seed %llu\n",
+                kPreload, w.ops.size(), (unsigned long long)seed);
+    std::printf("             ~50%% add, ~40%% cancel (live orders only), ~10%% market; book held near %d orders\n\n", kPreload);
 
-    // 1) Per-operation latency, single-threaded Book.
+    // 1) Latency per operation
+    std::printf("[1] latency per operation, ns\n");
+    std::printf("  %-10s %-7s %9s %7s %7s %7s %8s %10s\n", "engine", "op", "count", "p50", "p90", "p99", "p99.9", "max");
+    { V1 e;                         latency("v1", e, w); }
+    { V1Res e; e.b.reserve(400'000); latency("v1+reserve", e, w); }
+    { V2 e(w.max_id);               latency("v2", e, w); }
+
+    // 2) Throughput
+    std::printf("\n[2] throughput, single thread\n");
+    double t1, t2;
+    { V1 e;           t1 = throughput(e, w); }
+    { V2 e(w.max_id); t2 = throughput(e, w); }
+    std::printf("  v1   %10.2f M ops/s   %6.1f ns/op\n", t1 / 1e6, 1e9 / t1);
+    std::printf("  v2   %10.2f M ops/s   %6.1f ns/op   (%.2fx v1)\n", t2 / 1e6, 1e9 / t2, t2 / t1);
+
+    // 3) Locking: same per-thread op slices for every row
+    std::printf("\n[3] one mutex around v1, N threads sharing it (total ops fixed)\n");
+    double base = 0;
     {
-        Book book;
-        prefill(book, cfg.warmup_orders, kWarmBase, cfg.seed + 1);
-        std::vector<std::uint64_t> add_ns, cancel_ns, match_ns;
-        add_ns.reserve(ops.size()); cancel_ns.reserve(ops.size()); match_ns.reserve(ops.size());
-        for (const auto& op : ops) {
-            auto t0 = Clock::now();
-            g_sink = g_sink + run(book, op);
-            auto t1 = Clock::now();
-            auto ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
-            (op.kind == Kind::AddPassive ? add_ns : op.kind == Kind::Cancel ? cancel_ns : match_ns).push_back(ns);
-        }
-        std::printf("== 1) latency per operation: Book, 1 thread ==\n");
-        report("add", add_ns);
-        report("cancel", cancel_ns);
-        report("match", match_ns);
-        std::printf("  book at end: %zu resting orders\n", book.open_orders());
+        const Workload slice = make_workload(n_ops, seed + 1);
+        V1 e;
+        base = throughput(e, slice);
+        std::printf("  no lock, 1 thread   %8.2f M ops/s\n", base / 1e6);
     }
-
-    // 2) Throughput: same ops, no per-op timing. Book vs LockedBook (1 thread).
-    std::printf("== 2) throughput, 1 thread (same op sequence) ==\n");
-    double book_ops_s = 0;
-    {
-        Book book;
-        prefill(book, cfg.warmup_orders, kWarmBase, cfg.seed + 1);
-        auto t0 = Clock::now();
-        for (const auto& op : ops) g_sink = g_sink + run(book, op);
-        double s = seconds_since(t0);
-        book_ops_s = static_cast<double>(ops.size()) / s;
-        std::printf("  Book (no lock):        %10.0f ops/s\n", book_ops_s);
-    }
-    {
-        LockedBook book;
-        prefill(book, cfg.warmup_orders, kWarmBase, cfg.seed + 1);
-        auto t0 = Clock::now();
-        for (const auto& op : ops) g_sink = g_sink + run(book, op);
-        double s = seconds_since(t0);
-        double r = static_cast<double>(ops.size()) / s;
-        std::printf("  LockedBook (mutex):    %10.0f ops/s  (%.2fx of no-lock)\n", r, r / book_ops_s);
-    }
-
-    // 3) Contention: N threads share one LockedBook. Total ops = cfg.ops, split evenly.
-    std::printf("== 3) throughput, N threads sharing one LockedBook (total ops fixed) ==\n");
     for (unsigned n : {1u, 2u, 4u}) {
+        std::vector<Workload> slices;
+        for (unsigned t = 0; t < n; ++t) {
+            Workload s = make_workload(n_ops / static_cast<int>(n), seed + 1 + t);
+            const std::uint64_t shift = (t + 1) * 100'000'000ull;   // disjoint ids per thread
+            for (auto* list : {&s.preload, &s.ops})
+                for (auto& op : *list) op.order.id.value += shift;
+            slices.push_back(std::move(s));
+        }
         LockedBook book;
-        prefill(book, cfg.warmup_orders, kWarmBase, cfg.seed + 1);
-        Config per = cfg;
-        per.ops = cfg.ops / static_cast<int>(n);
-        std::vector<std::vector<Op>> slices;
-        for (unsigned t = 0; t < n; ++t)
-            slices.push_back(make_ops(per, kOpsBase * (t + 2), cfg.seed + 100 + t));  // disjoint ids
+        for (const auto& s : slices)
+            for (const auto& op : s.preload) book.add(op.order);
 
-        std::vector<std::size_t> sinks(n, 0);   // one slot per thread: no shared writes
+        std::vector<std::size_t> sinks(n, 0);
         auto t0 = Clock::now();
         std::vector<std::thread> ts;
         for (unsigned t = 0; t < n; ++t)
-            ts.emplace_back([&book, &slice = slices[t], &out = sinks[t]] {
+            ts.emplace_back([&book, &s = slices[t], &out = sinks[t]] {
                 std::size_t local = 0;
-                for (const auto& op : slice) local += run(book, op);
+                for (const auto& op : s.ops)
+                    local += op.kind == Kind::Cancel ? book.cancel(op.order.id).size()
+                                                     : book.add(op.order).size();
                 out = local;
             });
         for (auto& th : ts) th.join();
-        double s = seconds_since(t0);
+        const double secs = std::chrono::duration<double>(Clock::now() - t0).count();
         for (auto v : sinks) g_sink = g_sink + v;
-        double total = static_cast<double>(per.ops) * n;
-        std::printf("  %u thread(s):           %10.0f ops/s  (%.2fx of single-thread no-lock Book)\n",
-                    n, total / s, (total / s) / book_ops_s);
+        std::size_t total = 0;
+        for (const auto& s : slices) total += s.ops.size();
+        const double r = static_cast<double>(total) / secs;
+        std::printf("  mutex, %u thread(s)  %8.2f M ops/s   (%.2fx no lock)\n", n, r / 1e6, r / base);
     }
-
-    std::printf("== notes ==\n"
-                "  Latency includes timer overhead. Means are not reported on purpose.\n"
-                "  Run 3+ times; report the spread, not the best run.\n");
     return 0;
 }

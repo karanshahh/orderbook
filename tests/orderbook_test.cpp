@@ -9,6 +9,7 @@
 
 #include "orderbook/book.hpp"
 #include "orderbook/locked_book.hpp"
+#include "orderbook/v2/book.hpp"
 
 using namespace ob;
 
@@ -27,6 +28,13 @@ std::vector<T> only(const std::vector<Event>& evs) {
     for (const auto& e : evs)
         if (auto p = std::get_if<T>(&e)) out.push_back(*p);
     return out;
+}
+
+// Both engines must pass every behavior test.
+template <typename B> B make_book();
+template <> ob::Book make_book<ob::Book>() { return ob::Book{}; }
+template <> ob::v2::Book make_book<ob::v2::Book>() {
+    return ob::v2::Book{ob::v2::Config{Price{0}, Price{1'000}, 10'000, 100'000}};
 }
 
 // ---------------------------------------------------------------------------
@@ -189,9 +197,14 @@ TEST(PriceLevel, EraseMiddleKeepsFifo) {
     EXPECT_EQ(lvl.total(), Quantity{4});
 }
 
+// ---------- behavior tests, run on both engines ----------
+template <typename T> class BookTest : public ::testing::Test {};
+using Engines = ::testing::Types<ob::Book, ob::v2::Book>;
+TYPED_TEST_SUITE(BookTest, Engines);
+
 // ---------- add / resting ----------
-TEST(BookAdd, RestingLimitBuy) {
-    Book book;
+TYPED_TEST(BookTest, Add_RestingLimitBuy) {
+    auto book = make_book<TypeParam>();
     auto events = book.add(limit(1, Side::Buy, 100, 10));
     ASSERT_EQ(events.size(), 1u);
     EXPECT_TRUE(std::holds_alternative<Accepted>(events[0]));
@@ -199,8 +212,8 @@ TEST(BookAdd, RestingLimitBuy) {
     EXPECT_FALSE(book.crossed());
 }
 
-TEST(BookAdd, BestBidAndAsk) {
-    Book book;
+TYPED_TEST(BookTest, Add_BestBidAndAsk) {
+    auto book = make_book<TypeParam>();
     EXPECT_FALSE(book.best_bid().has_value());
     EXPECT_FALSE(book.best_ask().has_value());
     book.add(limit(1, Side::Buy, 99, 1));
@@ -213,8 +226,8 @@ TEST(BookAdd, BestBidAndAsk) {
 }
 
 // ---------- matching ----------
-TEST(BookMatch, FullFill) {
-    Book book;
+TYPED_TEST(BookTest, Match_FullFill) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 10));
     auto evs = book.add(limit(2, Side::Buy, 100, 10));
     auto trades = only<Trade>(evs);
@@ -224,8 +237,8 @@ TEST(BookMatch, FullFill) {
     EXPECT_EQ(book.levels(Side::Sell), 0u);
 }
 
-TEST(BookMatch, PartialFillRestsRemainder) {
-    Book book;
+TYPED_TEST(BookTest, Match_PartialFillRestsRemainder) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 4));
     auto evs = book.add(limit(2, Side::Buy, 100, 10));
     ASSERT_EQ(only<Trade>(evs).size(), 1u);
@@ -235,8 +248,8 @@ TEST(BookMatch, PartialFillRestsRemainder) {
     EXPECT_FALSE(book.best_ask().has_value());
 }
 
-TEST(BookMatch, CrossesSeveralLevels) {
-    Book book;
+TYPED_TEST(BookTest, Match_CrossesSeveralLevels) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 3));
     book.add(limit(2, Side::Sell, 101, 3));
     book.add(limit(3, Side::Sell, 102, 3));
@@ -250,16 +263,16 @@ TEST(BookMatch, CrossesSeveralLevels) {
     EXPECT_FALSE(book.crossed());
 }
 
-TEST(BookMatch, TradesAtRestingPrice) {
-    Book book;
+TYPED_TEST(BookTest, Match_TradesAtRestingPrice) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 5));
     auto trades = only<Trade>(book.add(limit(2, Side::Buy, 105, 5)));
     ASSERT_EQ(trades.size(), 1u);
     EXPECT_EQ(trades[0].price, Price{100});            // not 105
 }
 
-TEST(BookMatch, TimePriorityWithinLevel) {
-    Book book;
+TYPED_TEST(BookTest, Match_TimePriorityWithinLevel) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 5));
     book.add(limit(2, Side::Sell, 100, 5));
     auto trades = only<Trade>(book.add(limit(3, Side::Buy, 100, 7)));
@@ -271,16 +284,16 @@ TEST(BookMatch, TimePriorityWithinLevel) {
     EXPECT_EQ(book.volume_at(Side::Sell, Price{100}), Quantity{3});
 }
 
-TEST(BookMatch, MarketOrderEmptySide) {
-    Book book;
+TYPED_TEST(BookTest, Match_MarketOrderEmptySide) {
+    auto book = make_book<TypeParam>();
     auto evs = book.add(market(1, Side::Buy, 10));
     ASSERT_EQ(evs.size(), 1u);
     EXPECT_EQ(std::get<Rejected>(evs[0]).reason, RejectReason::NoLiquidity);
     EXPECT_EQ(book.open_orders(), 0u);
 }
 
-TEST(BookMatch, MarketRemainderIsCancelledNotRested) {
-    Book book;
+TYPED_TEST(BookTest, Match_MarketRemainderIsCancelledNotRested) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 4));
     auto evs = book.add(market(2, Side::Buy, 10));
     ASSERT_EQ(only<Trade>(evs).size(), 1u);
@@ -291,15 +304,15 @@ TEST(BookMatch, MarketRemainderIsCancelledNotRested) {
 }
 
 // ---------- rejects ----------
-TEST(BookReject, ZeroQuantity) {
-    Book book;
+TYPED_TEST(BookTest, Reject_ZeroQuantity) {
+    auto book = make_book<TypeParam>();
     auto evs = book.add(limit(1, Side::Buy, 100, 0));
     ASSERT_EQ(evs.size(), 1u);
     EXPECT_EQ(std::get<Rejected>(evs[0]).reason, RejectReason::ZeroQuantity);
 }
 
-TEST(BookReject, DuplicateId) {
-    Book book;
+TYPED_TEST(BookTest, Reject_DuplicateId) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Buy, 100, 1));
     auto evs = book.add(limit(1, Side::Buy, 99, 1));
     ASSERT_EQ(evs.size(), 1u);
@@ -308,8 +321,8 @@ TEST(BookReject, DuplicateId) {
 }
 
 // ---------- cancel ----------
-TEST(BookCancel, CancelFromMiddle) {
-    Book book;
+TYPED_TEST(BookTest, Cancel_CancelFromMiddle) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 1));
     book.add(limit(2, Side::Sell, 100, 2));
     book.add(limit(3, Side::Sell, 100, 3));
@@ -323,23 +336,23 @@ TEST(BookCancel, CancelFromMiddle) {
     EXPECT_EQ(trades[1].resting, OrderId{3});
 }
 
-TEST(BookCancel, UnknownId) {
-    Book book;
+TYPED_TEST(BookTest, Cancel_UnknownId) {
+    auto book = make_book<TypeParam>();
     auto evs = book.cancel(OrderId{42});
     ASSERT_EQ(evs.size(), 1u);
     EXPECT_EQ(std::get<Rejected>(evs[0]).reason, RejectReason::UnknownId);
 }
 
-TEST(BookCancel, LastOrderErasesLevel) {
-    Book book;
+TYPED_TEST(BookTest, Cancel_LastOrderErasesLevel) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Buy, 100, 1));
     book.cancel(OrderId{1});
     EXPECT_EQ(book.levels(Side::Buy), 0u);
     EXPECT_FALSE(book.best_bid().has_value());
 }
 
-TEST(BookCancel, DoubleCancel) {
-    Book book;
+TYPED_TEST(BookTest, Cancel_DoubleCancel) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Buy, 100, 1));
     book.cancel(OrderId{1});
     auto evs = book.cancel(OrderId{1});
@@ -347,8 +360,8 @@ TEST(BookCancel, DoubleCancel) {
 }
 
 // ---------- modify ----------
-TEST(BookModify, SizeDownKeepsPriority) {
-    Book book;
+TYPED_TEST(BookTest, Modify_SizeDownKeepsPriority) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 10));
     book.add(limit(2, Side::Sell, 100, 10));
     auto evs = book.modify(OrderId{1}, Price{100}, Quantity{3});
@@ -358,8 +371,8 @@ TEST(BookModify, SizeDownKeepsPriority) {
     EXPECT_EQ(trades[0].resting, OrderId{1});        // still first in line
 }
 
-TEST(BookModify, PriceChangeLosesPriority) {
-    Book book;
+TYPED_TEST(BookTest, Modify_PriceChangeLosesPriority) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 5));
     book.add(limit(2, Side::Sell, 100, 5));
     book.modify(OrderId{1}, Price{101}, Quantity{5});
@@ -369,8 +382,8 @@ TEST(BookModify, PriceChangeLosesPriority) {
     EXPECT_EQ(trades[0].resting, OrderId{2});
 }
 
-TEST(BookModify, SizeUpLosesPriority) {
-    Book book;
+TYPED_TEST(BookTest, Modify_SizeUpLosesPriority) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 100, 5));
     book.add(limit(2, Side::Sell, 100, 5));
     book.modify(OrderId{1}, Price{100}, Quantity{8});
@@ -379,8 +392,8 @@ TEST(BookModify, SizeUpLosesPriority) {
     EXPECT_EQ(trades[0].resting, OrderId{2});
 }
 
-TEST(BookModify, PriceChangeCanTrade) {
-    Book book;
+TYPED_TEST(BookTest, Modify_PriceChangeCanTrade) {
+    auto book = make_book<TypeParam>();
     book.add(limit(1, Side::Sell, 101, 5));
     book.add(limit(2, Side::Buy, 99, 5));
     auto trades = only<Trade>(book.modify(OrderId{2}, Price{101}, Quantity{5}));
@@ -390,9 +403,9 @@ TEST(BookModify, PriceChangeCanTrade) {
 }
 
 // ---------- whole-book properties ----------
-TEST(BookProperty, RandomOpsMatchReference) {
+TYPED_TEST(BookTest, Property_RandomOpsMatchReference) {
     for (std::uint64_t seed : {1u, 2u, 3u, 4u, 5u}) {
-        Book book;
+        auto book = make_book<TypeParam>();
         RefBook ref;
         auto ops = random_ops(seed, 5000);
         for (std::size_t i = 0; i < ops.size(); ++i) {
@@ -407,12 +420,78 @@ TEST(BookProperty, RandomOpsMatchReference) {
     }
 }
 
-TEST(BookProperty, DeterministicReplay) {
+TYPED_TEST(BookTest, Property_DeterministicReplay) {
     auto ops = random_ops(99, 20000);
-    Book a, b;
+    auto a = make_book<TypeParam>();
+    auto b = make_book<TypeParam>();
     for (const auto& op : ops) {
         ASSERT_TRUE(apply(a, op) == apply(b, op));
     }
+}
+
+// ---------- v2 vs v1 on long random streams ----------
+TEST(Differential, V2MatchesV1) {
+    for (std::uint64_t seed = 10; seed < 30; ++seed) {
+        ob::Book v1;
+        auto v2 = make_book<ob::v2::Book>();
+        auto ops = random_ops(seed, 20'000);
+        for (std::size_t i = 0; i < ops.size(); ++i) {
+            ASSERT_TRUE(apply(v1, ops[i]) == apply(v2, ops[i])) << "seed " << seed << " op " << i;
+        }
+        ASSERT_EQ(v1.open_orders(), v2.open_orders());
+        ASSERT_EQ(v1.best_bid(), v2.best_bid());
+        ASSERT_EQ(v1.best_ask(), v2.best_ask());
+    }
+}
+
+// ---------- v2-only limits ----------
+TEST(V2Limits, PriceOutOfRange) {
+    ob::v2::Book book{ob::v2::Config{Price{100}, Price{200}, 10, 100}};
+    auto evs = book.add(limit(1, Side::Buy, 99, 1));
+    EXPECT_EQ(std::get<Rejected>(evs.at(0)).reason, RejectReason::PriceOutOfRange);
+    evs = book.add(limit(2, Side::Buy, 201, 1));
+    EXPECT_EQ(std::get<Rejected>(evs.at(0)).reason, RejectReason::PriceOutOfRange);
+    EXPECT_EQ(book.open_orders(), 0u);
+}
+
+TEST(V2Limits, IdOutOfRange) {
+    ob::v2::Book book{ob::v2::Config{Price{0}, Price{200}, 10, 100}};
+    auto evs = book.add(limit(100, Side::Buy, 50, 1));
+    EXPECT_EQ(std::get<Rejected>(evs.at(0)).reason, RejectReason::IdOutOfRange);
+}
+
+TEST(V2Limits, BookFullThenSlotReused) {
+    ob::v2::Book book{ob::v2::Config{Price{0}, Price{200}, 2, 100}};
+    book.add(limit(1, Side::Buy, 50, 1));
+    book.add(limit(2, Side::Buy, 51, 1));
+    auto evs = book.add(limit(3, Side::Buy, 52, 1));
+    EXPECT_EQ(std::get<Rejected>(evs.at(0)).reason, RejectReason::BookFull);
+    book.cancel(OrderId{1});
+    evs = book.add(limit(3, Side::Buy, 52, 1));
+    EXPECT_TRUE(std::holds_alternative<Accepted>(evs.at(0)));
+    EXPECT_EQ(book.open_orders(), 2u);
+}
+
+TEST(V2Limits, ModifyToBadPriceKeepsOrder) {
+    ob::v2::Book book{ob::v2::Config{Price{0}, Price{200}, 10, 100}};
+    book.add(limit(1, Side::Buy, 50, 5));
+    auto evs = book.modify(OrderId{1}, Price{500}, Quantity{5});
+    EXPECT_EQ(std::get<Rejected>(evs.at(0)).reason, RejectReason::PriceOutOfRange);
+    EXPECT_EQ(book.open_orders(), 1u);
+    EXPECT_EQ(book.best_bid(), Price{50});
+}
+
+TEST(V2Limits, BestPriceWalksOverGaps) {
+    ob::v2::Book book{ob::v2::Config{Price{0}, Price{1'000}, 10, 100}};
+    book.add(limit(1, Side::Buy, 10, 1));
+    book.add(limit(2, Side::Buy, 900, 1));
+    book.add(limit(3, Side::Sell, 950, 1));
+    book.add(limit(4, Side::Sell, 999, 1));
+    book.cancel(OrderId{2});
+    book.cancel(OrderId{3});
+    EXPECT_EQ(book.best_bid(), Price{10});
+    EXPECT_EQ(book.best_ask(), Price{999});
+    EXPECT_EQ(book.levels(Side::Buy), 1u);
 }
 
 // ---------- threads (run under the TSan build) ----------

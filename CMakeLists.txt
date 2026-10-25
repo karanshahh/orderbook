@@ -20,14 +20,22 @@ find_package(Threads REQUIRED)
 add_library(orderbook_warnings INTERFACE)
 target_compile_options(orderbook_warnings INTERFACE -Wall -Wextra -Wpedantic)
 
-add_library(orderbook STATIC src/book.cpp src/price_level.cpp)
+# Order book engines: v1 (std containers) and v2 (pool, intrusive lists, flat arrays)
+add_library(orderbook STATIC src/book.cpp src/price_level.cpp src/v2/book.cpp)
 target_include_directories(orderbook PUBLIC include)
 target_compile_features(orderbook PUBLIC cxx_std_23)
 target_link_libraries(orderbook PRIVATE orderbook_warnings)
 
-# Benchmark (only meaningful in a Release build without sanitizers)
+# Nasdaq ITCH 5.0 decoder and replay builder
+add_library(itch STATIC src/itch/itch.cpp src/itch/replay.cpp)
+target_link_libraries(itch PUBLIC orderbook PRIVATE orderbook_warnings)
+
+# Programs (only meaningful in a Release build without sanitizers)
 add_executable(orderbook_bench bench/bench.cpp)
 target_link_libraries(orderbook_bench PRIVATE orderbook orderbook_warnings Threads::Threads)
+
+add_executable(itch_replay tools/itch_replay.cpp)
+target_link_libraries(itch_replay PRIVATE itch orderbook_warnings)
 
 include(FetchContent)
 FetchContent_Declare(googletest

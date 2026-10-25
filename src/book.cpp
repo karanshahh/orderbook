@@ -103,6 +103,14 @@ std::size_t Book::levels(Side side) const {
     return side == Side::Buy ? bids_.size() : asks_.size();
 }
 
+std::optional<Order> Book::find(OrderId id) const {
+    auto it = index_.find(id);
+    if (it == index_.end()) return std::nullopt;
+    return *it->second.handle;
+}
+
+void Book::reserve(std::size_t orders) { index_.reserve(orders); }
+
 std::optional<RejectReason> Book::validate(const Order& o) const {
     if (o.remaining.value == 0) return RejectReason::ZeroQuantity;
     if (index_.contains(o.id))  return RejectReason::DuplicateId;

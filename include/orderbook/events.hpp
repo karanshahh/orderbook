@@ -4,7 +4,15 @@
 
 namespace ob {
 
-enum class RejectReason : std::uint8_t { DuplicateId, ZeroQuantity, UnknownId, NoLiquidity };
+enum class RejectReason : std::uint8_t {
+    DuplicateId,      // id already resting in the book
+    ZeroQuantity,     // quantity must be > 0
+    UnknownId,        // cancel/modify of an id that is not resting
+    NoLiquidity,      // market order with nothing on the other side
+    PriceOutOfRange,  // v2 only: price outside the configured range
+    IdOutOfRange,     // v2 only: id >= configured max_order_id
+    BookFull,         // v2 only: order pool has no free slot
+};
 
 struct Accepted  { OrderId id;                            bool operator==(const Accepted&)  const = default; };
 struct Trade     { OrderId resting; OrderId aggressor; Price price; Quantity qty;

@@ -1,7 +1,7 @@
 name: ci
 on:
   push:
-    branches: [main]
+    branches: [main, "v*"]
   pull_request:
 jobs:
   sanitizers:
@@ -24,5 +24,5 @@ jobs:
       - run: cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build-release
       - run: ctest --test-dir build-release --output-on-failure
-      # Smoke-run only. CI machines are shared and noisy: never quote these numbers.
+      # Smoke run only. Shared CI machines are noisy: never quote these numbers.
       - run: ./build-release/orderbook_bench 50000

@@ -34,6 +34,10 @@ public:
     bool        crossed() const;        // best bid >= best ask; must never be true at rest
     std::size_t open_orders() const;
     std::size_t levels(Side side) const;
+    std::optional<Order> find(OrderId id) const;   // resting order, if any
+
+    // Pre-size the id index so it never rehashes while running.
+    void reserve(std::size_t orders);
 
 private:
     using Bids = std::map<Price, PriceLevel, std::greater<>>;   // best (highest) first
