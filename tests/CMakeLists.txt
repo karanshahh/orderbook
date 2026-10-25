@@ -5,5 +5,5 @@ target_link_libraries(smoke_test PRIVATE orderbook orderbook_warnings GTest::gte
 gtest_discover_tests(smoke_test)
 
 add_executable(orderbook_test orderbook_test.cpp)
-target_link_libraries(orderbook_test PRIVATE orderbook orderbook_warnings GTest::gtest_main)
+target_link_libraries(orderbook_test PRIVATE orderbook orderbook_warnings GTest::gtest_main Threads::Threads)
 gtest_discover_tests(orderbook_test)

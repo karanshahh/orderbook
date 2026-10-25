@@ -9,6 +9,8 @@ struct Order {
     OrderType type;
     Price     price;      // ignored for Market
     Quantity  remaining;
+
+    bool operator==(const Order&) const = default;
 };
 
 }  // namespace ob

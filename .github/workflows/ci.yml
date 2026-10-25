@@ -4,7 +4,7 @@ on:
     branches: [main]
   pull_request:
 jobs:
-  build:
+  sanitizers:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,3 +16,13 @@ jobs:
       - run: cmake -S . -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSANITIZE="${{ matrix.sanitize }}"
       - run: cmake --build build-ci
       - run: ctest --test-dir build-ci --output-on-failure
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-release
+      - run: ctest --test-dir build-release --output-on-failure
+      # Smoke-run only. CI machines are shared and noisy: never quote these numbers.
+      - run: ./build-release/orderbook_bench 50000
