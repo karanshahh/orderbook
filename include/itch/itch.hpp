@@ -17,14 +17,14 @@ namespace itch {
 
 using Symbol = std::array<char, 8>;   // space-padded, not null-terminated
 
-struct StockDirectory { std::uint16_t locate; Symbol stock; };                         // 'R'
+struct StockDirectory { std::uint16_t locate; Symbol stock; std::uint64_t ts = 0; };                         // 'R'
 struct AddOrder       { std::uint16_t locate; std::uint64_t ref; char side;              // 'A', 'F'
-                        std::uint32_t shares; Symbol stock; std::uint32_t price; };
-struct OrderExecuted  { std::uint16_t locate; std::uint64_t ref; std::uint32_t shares; }; // 'E', 'C'
-struct OrderCancel    { std::uint16_t locate; std::uint64_t ref; std::uint32_t shares; }; // 'X'
-struct OrderDelete    { std::uint16_t locate; std::uint64_t ref; };                       // 'D'
+                        std::uint32_t shares; Symbol stock; std::uint32_t price; std::uint64_t ts = 0; };
+struct OrderExecuted  { std::uint16_t locate; std::uint64_t ref; std::uint32_t shares; std::uint64_t ts = 0; }; // 'E', 'C'
+struct OrderCancel    { std::uint16_t locate; std::uint64_t ref; std::uint32_t shares; std::uint64_t ts = 0; }; // 'X'
+struct OrderDelete    { std::uint16_t locate; std::uint64_t ref; std::uint64_t ts = 0; };                       // 'D'
 struct OrderReplace   { std::uint16_t locate; std::uint64_t old_ref; std::uint64_t new_ref; // 'U'
-                        std::uint32_t shares; std::uint32_t price; };
+                        std::uint32_t shares; std::uint32_t price; std::uint64_t ts = 0; };
 
 using Message = std::variant<StockDirectory, AddOrder, OrderExecuted, OrderCancel,
                              OrderDelete, OrderReplace>;

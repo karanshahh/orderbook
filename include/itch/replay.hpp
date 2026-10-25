@@ -19,6 +19,7 @@ namespace itch {
 struct ReplayOp {
     enum class Kind : std::uint8_t { Add, Cancel, Reduce } kind;
     ob::Order order;   // Add: the order. Cancel: id. Reduce: id, price, new remaining size.
+    std::uint64_t ts = 0;   // ns since midnight, from the ITCH message that produced this op
 };
 
 struct ReplayStats {
@@ -59,6 +60,7 @@ private:
     std::uint64_t next_id_ = 1;
     std::int64_t  min_price_ = INT64_MAX, max_price_ = 0;
     std::size_t   peak_live_ = 0;
+    std::uint64_t cur_ts_ = 0;   // timestamp of the message being fed
 };
 
 }  // namespace itch

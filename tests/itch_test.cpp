@@ -135,3 +135,44 @@ TEST(ItchReplay, BuildsDenseOpsForOneSymbol) {
     EXPECT_EQ(ops[3].order.side, ob::Side::Buy);                 // replace keeps the side
     EXPECT_EQ(rb.stats().unknown_refs, 0u);
 }
+
+
+// ---- v2.1: timestamps ----
+#include <array>
+#include <cstddef>
+#include "itch/replay.hpp"
+
+// Order Delete: type(1) locate(2) tracking(2) timestamp(6) ref(8) = 19 bytes.
+// Distinct timestamp bytes, so a wrong byte order or offset gives a different value.
+TEST(ItchTimestamp, DecodesSixByteBigEndianAtOffsetFive) {
+    std::array<std::byte, 19> b{};
+    b[0] = std::byte{'D'};
+    b[2] = std::byte{7};                                   // locate 7
+    b[3] = std::byte{0xAA}; b[4] = std::byte{0xBB};        // tracking (must be skipped)
+    const unsigned char ts[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+    for (std::size_t i = 0; i < 6; ++i) b[5 + i] = std::byte{ts[i]};
+    b[18] = std::byte{42};                                 // ref 42
+    auto r = itch::decode(b);
+    ASSERT_TRUE(r.has_value());
+    auto* d = std::get_if<itch::OrderDelete>(&*r);
+    ASSERT_NE(d, nullptr);
+    EXPECT_EQ(d->ts, 0x010203040506ULL);
+    EXPECT_EQ(d->locate, 7u);
+    EXPECT_EQ(d->ref, 42u);
+}
+
+// Each ReplayOp takes the timestamp of the message that produced it.
+TEST(ItchTimestamp, ReplayOpsCarryMessageTimestamp) {
+    const itch::Symbol s{'T', 'E', 'S', 'T', ' ', ' ', ' ', ' '};
+    itch::ReplayBuilder rb("TEST");
+    itch::StockDirectory dir{};  dir.locate = 7; dir.stock = s; dir.ts = 1;
+    itch::AddOrder add{};        add.locate = 7; add.ref = 1; add.side = 'B';
+                                 add.shares = 100; add.stock = s; add.price = 10000; add.ts = 123;
+    itch::OrderCancel cx{};      cx.locate = 7; cx.ref = 1; cx.shares = 40; cx.ts = 200;
+    itch::OrderDelete del{};     del.locate = 7; del.ref = 1; del.ts = 456;
+    rb.feed(dir); rb.feed(add); rb.feed(cx); rb.feed(del);
+    ASSERT_EQ(rb.ops().size(), 3u);                        // Add, Reduce, Cancel
+    EXPECT_EQ(rb.ops()[0].ts, 123u);
+    EXPECT_EQ(rb.ops()[1].ts, 200u);
+    EXPECT_EQ(rb.ops()[2].ts, 456u);
+}

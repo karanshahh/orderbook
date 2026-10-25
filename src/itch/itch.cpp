@@ -20,6 +20,12 @@ std::uint64_t u64(std::span<const std::byte> b, std::size_t o) {
     for (std::size_t i = 0; i < 8; ++i) v = (v << 8) | std::to_integer<std::uint64_t>(b[o + i]);
     return v;
 }
+// 6-byte big-endian field (ITCH timestamps: nanoseconds since midnight).
+std::uint64_t u48(std::span<const std::byte> b, std::size_t o) {
+    std::uint64_t v = 0;
+    for (std::size_t i = 0; i < 6; ++i) v = (v << 8) | std::to_integer<std::uint64_t>(b[o + i]);
+    return v;
+}
 Symbol sym(std::span<const std::byte> b, std::size_t o) {
     Symbol s{};
     std::memcpy(s.data(), b.data() + o, 8);
@@ -28,6 +34,7 @@ Symbol sym(std::span<const std::byte> b, std::size_t o) {
 
 // Every message starts with: type(1) locate(2) tracking(2) timestamp(6) = 11 bytes.
 constexpr std::size_t kHeader = 11;
+constexpr std::size_t kTimestamp = 5;   // after type(1) locate(2) tracking(2)
 
 }  // namespace
 
@@ -41,25 +48,25 @@ std::expected<Message, DecodeError> decode(std::span<const std::byte> m) {
     switch (type) {
         case 'R':   // Stock Directory, 39 bytes
             if (!need(39)) return truncated;
-            return StockDirectory{u16(m, 1), sym(m, kHeader)};
+            return StockDirectory{u16(m, 1), sym(m, kHeader), u48(m, kTimestamp)};
         case 'A':   // Add Order, 36 bytes
         case 'F':   // Add Order with MPID attribution, 40 bytes (extra field ignored)
             if (!need(type == 'A' ? 36 : 40)) return truncated;
             return AddOrder{u16(m, 1), u64(m, 11), static_cast<char>(m[19]),
-                            u32(m, 20), sym(m, 24), u32(m, 32)};
+                            u32(m, 20), sym(m, 24), u32(m, 32), u48(m, kTimestamp)};
         case 'E':   // Order Executed, 31 bytes
         case 'C':   // Order Executed With Price, 36 bytes (price ignored for the book)
             if (!need(type == 'E' ? 31 : 36)) return truncated;
-            return OrderExecuted{u16(m, 1), u64(m, 11), u32(m, 19)};
+            return OrderExecuted{u16(m, 1), u64(m, 11), u32(m, 19), u48(m, kTimestamp)};
         case 'X':   // Order Cancel (partial), 23 bytes
             if (!need(23)) return truncated;
-            return OrderCancel{u16(m, 1), u64(m, 11), u32(m, 19)};
+            return OrderCancel{u16(m, 1), u64(m, 11), u32(m, 19), u48(m, kTimestamp)};
         case 'D':   // Order Delete, 19 bytes
             if (!need(19)) return truncated;
-            return OrderDelete{u16(m, 1), u64(m, 11)};
+            return OrderDelete{u16(m, 1), u64(m, 11), u48(m, kTimestamp)};
         case 'U':   // Order Replace, 35 bytes
             if (!need(35)) return truncated;
-            return OrderReplace{u16(m, 1), u64(m, 11), u64(m, 19), u32(m, 27), u32(m, 31)};
+            return OrderReplace{u16(m, 1), u64(m, 11), u64(m, 19), u32(m, 27), u32(m, 31), u48(m, kTimestamp)};
         default:
             return std::unexpected(DecodeError::Ignored);
     }
